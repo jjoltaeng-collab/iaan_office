@@ -1,3 +1,7 @@
+
+
+HTML 아이콘
+index
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -137,6 +141,12 @@
 
     <main class="max-w-6xl mx-auto px-4 mt-6 space-y-6">
 
+      <!-- 로컬 파일(file://) 실행 안내 배너 -->
+      <div id="localFileNotice" class="hidden bg-amber-50 border border-amber-300 text-amber-900 rounded-xl px-4 py-2.5 text-xs flex items-center justify-between gap-2">
+        <span>⚠️ 현재 파일 직접 열기(<code>file://</code>)로 실행 중입니다. 브라우저 보안 제한을 피하려면 로컬 서버(<code>http://localhost</code>)로 여는 것을 권장합니다.</span>
+        <button type="button" onclick="document.getElementById('localFileNotice').classList.add('hidden')" class="text-amber-700 font-bold hover:underline shrink-0 cursor-pointer">닫기</button>
+      </div>
+
       <!-- 현재 메뉴 범위 및 관리자 데이터 관리 바 -->
       <section class="bg-white rounded-xl shadow-sm px-4 py-3 border border-slate-200 flex flex-wrap items-center justify-between gap-2">
         <div class="text-xs font-bold text-slate-700">
@@ -161,6 +171,14 @@
             <div id="routeStatusText" class="text-xs text-slate-600 mt-0.5"></div>
           </div>
           <div class="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              id="retryGeocodeBtn"
+              onclick="retryFailedGeocodes()"
+              class="hidden px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 hover:bg-amber-600 cursor-pointer"
+            >
+              미확인 재계산
+            </button>
             <button
               type="button"
               id="sortByDistanceBtn"
@@ -248,7 +266,8 @@
     const ADMIN_ACCESS_CODE = 'admin2026';
     const ACCESS_STORAGE_KEY = 'pharmacy_app_unlocked_v1';
     const ADMIN_STORAGE_KEY = 'pharmacy_app_is_admin_v1';
-    const COORD_LOCAL_CACHE_KEY = 'pharmacy_geocode_cache_v2';
+    const COORD_LOCAL_CACHE_KEY = 'pharmacy_geocode_cache_v3';
+    const FAILED_CACHE_TTL = 24 * 60 * 60 * 1000; // 실패 주소 24시간 캐시
 
     // ==========================================
     // [필수 입력] Supabase 키 입력
@@ -297,10 +316,20 @@
       return (address || '').replace(/\s+/g, ' ').trim();
     }
 
+    function isValidCachedEntry(entry) {
+      if (!entry || typeof entry !== 'object') return false;
+      if (typeof entry.lat === 'number' && typeof entry.lon === 'number') return true;
+      if (entry.failedAt && (Date.now() - entry.failedAt) < FAILED_CACHE_TTL) return true;
+      return false;
+    }
+
+    // 반환값: { lat, lon } (성공 캐시) | null (실패 캐시 또는 주소 없음) | undefined (미조회)
     function getCachedCoords(customer) {
       const key = normalizeAddressKey(customer.address);
       if (!key) return null;
-      return Object.prototype.hasOwnProperty.call(coordCache, key) ? coordCache[key] : undefined;
+      const entry = coordCache[key];
+      if (!isValidCachedEntry(entry)) return undefined;
+      return entry.failedAt ? null : entry;
     }
 
     function syncAdminUI() {
@@ -375,6 +404,10 @@
     function unlockApp(asAdmin = false) {
       document.getElementById('accessLockOverlay').classList.add('hidden');
       document.getElementById('appWrapper').classList.remove('hidden');
+      if (window.location.protocol === 'file:') {
+        const notice = document.getElementById('localFileNotice');
+        if (notice) notice.classList.remove('hidden');
+      }
       setAdminState(asAdmin);
       if (!isAppInitialized) {
         isAppInitialized = true;
@@ -481,121 +514,144 @@
       return `약 ${(meters / 1000).toFixed(1)}km`;
     }
 
-    // 한국 주소를 Nominatim이 잘 인식하는 형태(시/군/구 + 도로명/지번 + 본번)로 단계별 정제
+    // 한국 주소 정제 및 단계별 검색 후보 생성
     function buildAddressCandidates(rawAddress) {
       let clean = (rawAddress || '')
         .replace(/\(.*?\)/g, ' ')
         .replace(/\[.*?\]/g, ' ')
         .replace(/,.*$/g, ' ')
-        .replace(/\b\d+\s*층\b/g, ' ')
-        .replace(/\b지하\s*\d+\s*층?\b/g, ' ')
-        .replace(/\b\d+\s*호\b/g, ' ')
+        .replace(/ (?:지하\s*)?\d+\s*층 /g, ' ')
+        .replace(/ \d+\s*호 /g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+
       if (!clean) return [];
 
-      const roadMatch = clean.match(/^(.+?(?:대로|로|길|동|읍|면|리)\s*\d+(?:-\d+)?)/);
-      const baseRoad = roadMatch ? roadMatch[1].trim() : clean;
+      // 번지(예: 123-45) 또는 동/리/로/길 기준 핵심 주소 추출
+      const roadWithNum = clean.match(/^(.+?(?:특별자치시|특별자치도|광역시|특별시|도)?\s*[가-힣]+(?:시|군|구)\s+[가-힣0-9]+(?:대로|로|길|동|읍|면|리)\s*\d+(?:-\d+)?)/);
+      const baseAddr = roadWithNum ? roadWithNum[1].trim() : clean;
 
-      const shortRegion = baseRoad
-        .replace(/^서울특별시\s+/, '서울 ')
-        .replace(/^경기도\s+/, '경기 ')
-        .replace(/^인천광역시\s+/, '인천 ')
-        .replace(/^부산광역시\s+/, '부산 ')
-        .replace(/^대구광역시\s+/, '대구 ')
-        .replace(/^대전광역시\s+/, '대전 ')
-        .replace(/^광주광역시\s+/, '광주 ')
-        .replace(/^울산광역시\s+/, '울산 ')
-        .replace(/^세종특별자치시\s+/, '세종 ');
+      // 시/도 접두어 축약 (예: 서울특별시 -> 서울)
+      const shortAddr = baseAddr
+        .replace(/서울특별시/g, '서울')
+        .replace(/부산광역시/g, '부산')
+        .replace(/대구광역시/g, '대구')
+        .replace(/인천광역시/g, '인천')
+        .replace(/광주광역시/g, '광주')
+        .replace(/대전광역시/g, '대전')
+        .replace(/울산광역시/g, '울산')
+        .replace(/세종특별자치시/g, '세종')
+        .replace(/경기도/g, '경기')
+        .replace(/강원특별자치도|강원도/g, '강원')
+        .replace(/충청북도/g, '충북')
+        .replace(/충청남도/g, '충남')
+        .replace(/전북특별자치도|전라북도/g, '전북')
+        .replace(/전라남도/g, '전남')
+        .replace(/경상북도/g, '경북')
+        .replace(/경상남도/g, '경남')
+        .replace(/제주특별자치도/g, '제주');
 
-      const withoutProvince = baseRoad.replace(/^(?:서울특별시|경기도|인천광역시|부산광역시|대구광역시|대전광역시|광주광역시|울산광역시|세종특별자치시|강원특별자치도|강원도|충청북도|충청남도|전북특별자치도|전라북도|전라남도|경상북도|경상남도|제주특별자치도)\s+/, '');
+      // 번지 제거한 도로명/동 단위 폴백 (상세 번지가 지도에 없을 때 대비)
+      const noBunjiAddr = shortAddr.replace(/\s+\d+(?:-\d+)?$/, '').trim();
 
-      const streetOnlyMatch = withoutProvince.match(/([^\s]+(?:대로|로|길|동)\s*\d+(?:-\d+)?)/);
-      const streetOnly = streetOnlyMatch ? streetOnlyMatch[1].trim() : '';
-
-      const candidates = [
-        baseRoad,
-        shortRegion,
-        withoutProvince,
-        streetOnly,
-        clean
-      ].filter(Boolean);
-
-      return [...new Set(candidates)];
+      return [...new Set([baseAddr, shortAddr, noBunjiAddr, clean].filter(Boolean))];
     }
 
-    async function queryNominatim(queryText) {
-      const now = Date.now();
-      if (now < nominatimBlockedUntil) {
-        const err = new Error('RATE_LIMITED');
-        err.status = 629;
-        throw err;
+    // Photon 무료 지오코딩 폴백 (Nominatim 629/429/CORS 차단 시 즉시 전환)
+    async function queryPhotonFallback(queryText) {
+      try {
+        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(queryText)}&limit=1`;
+        const res = await fetch(url);
+        if (!res.ok) return null;
+
+        const data = await res.json();
+        const feat = data && Array.isArray(data.features) ? data.features[0] : null;
+        const coords = feat && feat.geometry && feat.geometry.coordinates;
+        if (Array.isArray(coords) && coords.length >= 2) {
+          // GeoJSON 좌표는 [lon, lat] 순서
+          return {
+            lat: parseFloat(coords[1]),
+            lon: parseFloat(coords[0])
+          };
+        }
+      } catch (err) {
+        return null;
+      }
+      return null;
+    }
+
+    // Nominatim 조회 (차단/629 발생 시 2분간 차단 플래그 설정 후 Photon 폴백 사용)
+    async function queryGeocodeProvider(queryText) {
+      if (Date.now() < nominatimBlockedUntil) {
+        return await queryPhotonFallback(queryText);
       }
 
       const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&countrycodes=kr&limit=1&q=${encodeURIComponent(queryText)}`;
-      const res = await fetch(url, {
-        headers: {
-          'Accept': 'application/json',
-          'Accept-Language': 'ko-KR,ko;q=0.9'
+      try {
+        const res = await fetch(url, {
+          headers: {
+            'Accept': 'application/json'
+          }
+        });
+
+        if (res.status === 429 || res.status === 629 || res.status === 403) {
+          nominatimBlockedUntil = Date.now() + 120000;
+          return await queryPhotonFallback(queryText);
         }
-      });
 
-      if (res.status === 429 || res.status === 629) {
-        // 60초간 추가 Nominatim 호출 중단으로 차단 심화 방지
-        nominatimBlockedUntil = Date.now() + 60000;
-        const err = new Error(`HTTP_${res.status}`);
-        err.status = res.status;
-        throw err;
-      }
+        if (!res.ok) {
+          return await queryPhotonFallback(queryText);
+        }
 
-      if (!res.ok) {
-        const err = new Error(`HTTP_${res.status}`);
-        err.status = res.status;
-        throw err;
-      }
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0 && data[0].lat && data[0].lon) {
+          return {
+            lat: parseFloat(data[0].lat),
+            lon: parseFloat(data[0].lon)
+          };
+        }
 
-      const list = await res.json();
-      if (Array.isArray(list) && list.length > 0 && list[0].lat && list[0].lon) {
-        return { lat: parseFloat(list[0].lat), lon: parseFloat(list[0].lon) };
+        return await queryPhotonFallback(queryText);
+      } catch (err) {
+        // 629 네트워크 에러 또는 CORS 차단 시 즉시 2분간 Nominatim 우회하고 Photon 폴백
+        nominatimBlockedUntil = Date.now() + 120000;
+        return await queryPhotonFallback(queryText);
       }
-      return null;
     }
 
     async function geocodeSingleCustomer(customer) {
       const addrKey = normalizeAddressKey(customer.address);
       if (!addrKey) return null;
 
-      if (Object.prototype.hasOwnProperty.call(coordCache, addrKey) && coordCache[addrKey]) {
-        return coordCache[addrKey];
+      const cached = getCachedCoords(customer);
+      if (cached !== undefined) {
+        return cached;
       }
 
-      if (Date.now() < nominatimBlockedUntil) {
-        return null;
-      }
+      // 629 차단을 피하기 위해 상위 2개 핵심 후보(정제 주소, 시/도 축약 또는 동/도로명 단위)만 조회
+      const allCandidates = buildAddressCandidates(addrKey);
+      const candidates = allCandidates.length >= 3
+        ? [allCandidates[0], allCandidates[2]]
+        : allCandidates.slice(0, 2);
 
-      // 629 방지를 위해 가장 확률 높은 대표 후보 2개만 시도
-      const candidates = buildAddressCandidates(addrKey).slice(0, 2);
       for (const query of candidates) {
-        try {
-          const coords = await queryNominatim(query);
-          if (coords) {
-            coordCache[addrKey] = coords;
-            saveLocalCoordCache();
-            return coords;
-          }
-          await new Promise(r => setTimeout(r, 1100));
-        } catch (err) {
-          if (err && (err.status === 429 || err.status === 629)) {
-            break;
-          }
+        const coords = await queryGeocodeProvider(query);
+        if (coords) {
+          coordCache[addrKey] = coords;
+          saveLocalCoordCache();
+          return coords;
         }
+        await new Promise(r => setTimeout(r, 1200));
       }
 
+      // 찾지 못한 주소도 24시간 실패 캐시로 저장해 반복 에러 호출 방지
+      coordCache[addrKey] = { failedAt: Date.now() };
+      saveLocalCoordCache();
       return null;
     }
 
-    async function selectRouteAnchor(id) {
-      if (anchorCustomerId === id) {
+    async function selectRouteAnchor(id, forceRetry = false) {
+      if (!forceRetry && anchorCustomerId === id) {
         clearRouteAnchor();
         return;
       }
@@ -616,7 +672,7 @@
       }
 
       // 1단계: 기준약국 좌표 최우선 확보
-      if (anchor.address && !getCachedCoords(anchor)) {
+      if (anchor.address && getCachedCoords(anchor) === undefined) {
         await geocodeSingleCustomer(anchor);
         if (currentRunId !== geocodeRunId || anchorCustomerId !== id) return;
         renderRoutePanel();
@@ -628,16 +684,18 @@
 
       for (const c of targets) {
         if (currentRunId !== geocodeRunId || anchorCustomerId !== id) return;
-        if (Date.now() < nominatimBlockedUntil) break;
         if (!c.address || !c.address.trim()) continue;
-        if (getCachedCoords(c)) continue;
+        if (getCachedCoords(c) !== undefined) continue;
 
         await geocodeSingleCustomer(c);
         if (currentRunId !== geocodeRunId || anchorCustomerId !== id) return;
 
         renderRoutePanel();
         renderCustomers();
-        await new Promise(r => setTimeout(r, 1100));
+
+        // Nominatim 차단 중에는 Photon을 쓰므로 대기 시간을 짧게, 정상 시엔 1.2초 간격 유지
+        const delayMs = Date.now() < nominatimBlockedUntil ? 350 : 1200;
+        await new Promise(r => setTimeout(r, delayMs));
       }
 
       if (currentRunId === geocodeRunId) {
@@ -645,6 +703,18 @@
         renderRoutePanel();
         renderCustomers();
       }
+    }
+
+    // 실패 캐시로 묶인 주소들만 초기화 후 재계산
+    function retryFailedGeocodes() {
+      if (!anchorCustomerId) return;
+      Object.keys(coordCache).forEach(key => {
+        if (coordCache[key] && coordCache[key].failedAt) {
+          delete coordCache[key];
+        }
+      });
+      saveLocalCoordCache();
+      selectRouteAnchor(anchorCustomerId, true);
     }
 
     function clearRouteAnchor() {
@@ -694,7 +764,8 @@
           : 'px-3 py-1.5 rounded-lg text-xs font-bold bg-white text-indigo-700 border border-indigo-300 hover:bg-indigo-100 cursor-pointer';
       }
 
-      const anchorReady = Boolean(getCachedCoords(anchor));
+      const anchorCoord = getCachedCoords(anchor);
+      const anchorReady = Boolean(anchorCoord);
       const candidates = getAnchorScopeCustomers(anchor)
         .filter(c => c.id !== anchor.id)
         .map(c => ({
@@ -709,14 +780,17 @@
         });
 
       const resolvedCount = candidates.filter(x => x.distance != null).length;
-      const isBlocked = Date.now() < nominatimBlockedUntil;
+      const unresolvedCount = candidates.length - resolvedCount;
+
+      const retryBtn = document.getElementById('retryGeocodeBtn');
+      if (retryBtn) {
+        const showRetry = !isGeocoding && (!anchorReady || unresolvedCount > 0);
+        retryBtn.classList.toggle('hidden', !showRetry);
+      }
 
       let statusMessage = '';
       if (!anchor.address || !anchor.address.trim()) {
         statusMessage = '기준약국의 주소가 비어 있어 거리를 계산할 수 없습니다.';
-      } else if (isBlocked) {
-        const remainSec = Math.ceil((nominatimBlockedUntil - Date.now()) / 1000);
-        statusMessage = `지도 서버 호출 제한으로 약 ${remainSec}초간 대기 중입니다. (현재 ${resolvedCount}곳 계산 완료 / 길찾기 버튼은 바로 이용 가능)`;
       } else if (!anchorReady && isGeocoding) {
         statusMessage = '기준약국 주소를 좌표로 변환하는 중입니다...';
       } else if (!anchorReady && !isGeocoding) {
@@ -735,9 +809,11 @@
       }
 
       listEl.innerHTML = candidates.slice(0, 9).map(({ customer: c, distance }) => {
+        const cachedState = getCachedCoords(c);
+        const pending = isGeocoding && cachedState === undefined;
         const distLabel = distance != null
           ? `<span class="text-xs font-extrabold text-indigo-700">${formatDistance(distance)}</span>`
-          : `<span class="text-xs text-slate-400">${isGeocoding && !isBlocked ? '계산 중...' : '거리 미확인'}</span>`;
+          : `<span class="text-xs text-slate-400">${pending ? '계산 중...' : '거리 미확인'}</span>`;
 
         return `
           <div class="bg-white rounded-lg p-3 border border-indigo-100 flex items-center justify-between gap-2">
@@ -866,7 +942,7 @@
         const count = allCustomers.filter(c => getItemName(c) === item).length;
         const isActive = selectedItem === item;
         return `
-          <button type="button" onclick="setItemMenu('${item.replace(/'/g, "\\'")}')"
+          <button type="button" onclick="setItemMenu('${item.replace(/'/g, "\'")}')"
             class="px-3 py-1 rounded-md text-xs font-bold transition shrink-0 cursor-pointer ${
               isActive
                 ? 'bg-amber-400 text-slate-900 shadow-sm'
@@ -1013,7 +1089,7 @@
         const isActive = selectedManager === mgr;
 
         return `
-          <button type="button" onclick="setManagerFilter('${mgr.replace(/'/g, "\\'")}')"
+          <button type="button" onclick="setManagerFilter('${mgr.replace(/'/g, "\'")}')"
             class="px-3.5 py-2 rounded-lg text-xs font-bold transition border cursor-pointer ${
               isActive
                 ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
@@ -1261,3 +1337,4 @@
   </script>
 </body>
 </html>
+분석 중
