@@ -1,7 +1,3 @@
-
-
-HTML 아이콘
-index
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -166,7 +162,7 @@ index
       <section id="routePanel" class="hidden bg-indigo-50/70 rounded-xl shadow-sm p-4 border border-indigo-200 space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <div class="text-xs font-bold text-indigo-700">🧭 기준약국 주변 동선</div>
+            <div class="text-xs font-bold text-indigo-700" id="routePanelTitle">🧭 기준약국 주변 동선</div>
             <div id="routeAnchorInfo" class="text-sm font-extrabold text-slate-900 mt-0.5"></div>
             <div id="routeStatusText" class="text-xs text-slate-600 mt-0.5"></div>
           </div>
@@ -266,7 +262,7 @@ index
     const ADMIN_ACCESS_CODE = 'admin2026';
     const ACCESS_STORAGE_KEY = 'pharmacy_app_unlocked_v1';
     const ADMIN_STORAGE_KEY = 'pharmacy_app_is_admin_v1';
-    const COORD_LOCAL_CACHE_KEY = 'pharmacy_geocode_cache_v3';
+    const COORD_LOCAL_CACHE_KEY = 'pharmacy_geocode_cache_v4';
     const FAILED_CACHE_TTL = 24 * 60 * 60 * 1000; // 실패 주소 24시간 캐시
 
     // ==========================================
@@ -285,7 +281,7 @@ index
     let selectedVisitFilter = 'ALL'; // 'ALL' | 'UNVISITED' | 'VISITED'
     let searchKeyword = '';
 
-    // 주변 약국 동선 상태 (필터와 독립적으로 기준약국 중심 동작)
+    // 주변 약국 동선 상태 (현재 선택된 메뉴 + 담당자 필터 범위 내에서 계산)
     let anchorCustomerId = null;
     let sortByDistance = true;
     let coordCache = loadLocalCoordCache();
@@ -323,9 +319,9 @@ index
       return false;
     }
 
-    // 반환값: { lat, lon } (성공 캐시) | null (실패 캐시 또는 주소 없음) | undefined (미조회)
+    // 반환값: { lat, lon } (성공 캐시) | null (실패 캐시 또는 정보 없음) | undefined (미조회)
     function getCachedCoords(customer) {
-      const key = normalizeAddressKey(customer.address);
+      const key = normalizeAddressKey(customer.address || customer.customer_name);
       if (!key) return null;
       const entry = coordCache[key];
       if (!isValidCachedEntry(entry)) return undefined;
@@ -484,14 +480,14 @@ index
       return allCustomers.filter(c => getItemName(c) === selectedItem);
     }
 
-    // 기준약국과 같은 메뉴(전체 메뉴면 전체) 범위의 약국 목록 (필터와 무관)
+    // 기준약국 주변 동선 범위: 현재 선택된 메뉴 + 담당자 필터 기준
     function getAnchorScopeCustomers(anchor) {
       if (!anchor) return [];
-      const anchorItem = getItemName(anchor);
-      if (selectedItem === 'ALL') {
-        return allCustomers.filter(c => getItemName(c) === anchorItem);
+      let list = getMenuScopedCustomers();
+      if (selectedManager !== 'ALL') {
+        list = list.filter(c => getManagerName(c) === selectedManager);
       }
-      return allCustomers.filter(c => getItemName(c) === selectedItem);
+      return list;
     }
 
     // 두 좌표 간 직선거리(미터) 계산 (Haversine)
@@ -520,8 +516,8 @@ index
         .replace(/\(.*?\)/g, ' ')
         .replace(/\[.*?\]/g, ' ')
         .replace(/,.*$/g, ' ')
-        .replace(/ (?:지하\s*)?\d+\s*층 /g, ' ')
-        .replace(/ \d+\s*호 /g, ' ')
+        .replace(/(?:지하\s*)?\d+\s*층/g, ' ')
+        .replace(/\d+\s*호/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 
@@ -557,22 +553,25 @@ index
       return [...new Set([baseAddr, shortAddr, noBunjiAddr, clean].filter(Boolean))];
     }
 
-    // Photon 무료 지오코딩 폴백 (Nominatim 629/429/CORS 차단 시 즉시 전환)
+    // Photon 무료 지오코딩 (한국 내 좌표만 허용)
     async function queryPhotonFallback(queryText) {
       try {
-        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(queryText)}&limit=1`;
+        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(queryText)}&limit=3`;
         const res = await fetch(url);
         if (!res.ok) return null;
 
         const data = await res.json();
-        const feat = data && Array.isArray(data.features) ? data.features[0] : null;
-        const coords = feat && feat.geometry && feat.geometry.coordinates;
-        if (Array.isArray(coords) && coords.length >= 2) {
-          // GeoJSON 좌표는 [lon, lat] 순서
-          return {
-            lat: parseFloat(coords[1]),
-            lon: parseFloat(coords[0])
-          };
+        const features = data && Array.isArray(data.features) ? data.features : [];
+        for (const feat of features) {
+          const coords = feat && feat.geometry && feat.geometry.coordinates;
+          if (Array.isArray(coords) && coords.length >= 2) {
+            const lon = parseFloat(coords[0]);
+            const lat = parseFloat(coords[1]);
+            // 대한민국 위·경도 범위 검증 (위도 33~39, 경도 124~132)
+            if (lat >= 33 && lat <= 39 && lon >= 124 && lon <= 132) {
+              return { lat, lon };
+            }
+          }
         }
       } catch (err) {
         return null;
@@ -580,10 +579,10 @@ index
       return null;
     }
 
-    // Nominatim 조회 (차단/629 발생 시 2분간 차단 플래그 설정 후 Photon 폴백 사용)
-    async function queryGeocodeProvider(queryText) {
+    // Nominatim 조회 (차단/629 발생 시 2분간 차단 플래그 설정)
+    async function queryNominatimDirect(queryText) {
       if (Date.now() < nominatimBlockedUntil) {
-        return await queryPhotonFallback(queryText);
+        return null;
       }
 
       const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&countrycodes=kr&limit=1&q=${encodeURIComponent(queryText)}`;
@@ -596,11 +595,11 @@ index
 
         if (res.status === 429 || res.status === 629 || res.status === 403) {
           nominatimBlockedUntil = Date.now() + 120000;
-          return await queryPhotonFallback(queryText);
+          return null;
         }
 
         if (!res.ok) {
-          return await queryPhotonFallback(queryText);
+          return null;
         }
 
         const data = await res.json();
@@ -610,17 +609,15 @@ index
             lon: parseFloat(data[0].lon)
           };
         }
-
-        return await queryPhotonFallback(queryText);
+        return null;
       } catch (err) {
-        // 629 네트워크 에러 또는 CORS 차단 시 즉시 2분간 Nominatim 우회하고 Photon 폴백
         nominatimBlockedUntil = Date.now() + 120000;
-        return await queryPhotonFallback(queryText);
+        return null;
       }
     }
 
     async function geocodeSingleCustomer(customer) {
-      const addrKey = normalizeAddressKey(customer.address);
+      const addrKey = normalizeAddressKey(customer.address || customer.customer_name);
       if (!addrKey) return null;
 
       const cached = getCachedCoords(customer);
@@ -628,20 +625,37 @@ index
         return cached;
       }
 
-      // 629 차단을 피하기 위해 상위 2개 핵심 후보(정제 주소, 시/도 축약 또는 동/도로명 단위)만 조회
-      const allCandidates = buildAddressCandidates(addrKey);
-      const candidates = allCandidates.length >= 3
-        ? [allCandidates[0], allCandidates[2]]
-        : allCandidates.slice(0, 2);
+      const rawAddr = normalizeAddressKey(customer.address);
+      const pharmacyName = getPharmacyName(customer);
+      const allCandidates = buildAddressCandidates(rawAddr);
 
-      for (const query of candidates) {
-        const coords = await queryGeocodeProvider(query);
+      // 시/군/구 + 약국명 조합 (상세 도로명 번지가 OSM/Photon에 없을 때 보완)
+      const regionMatch = rawAddr.match(/^((?:[가-힣]+(?:특별시|광역시|특별자치시|도|특별자치도)\s+)?[가-힣]+(?:시|군|구))/);
+      const regionPrefix = regionMatch ? regionMatch[1].trim() : '';
+      const nameQuery = pharmacyName && pharmacyName !== '약국명 없음'
+        ? `${regionPrefix} ${pharmacyName}`.trim()
+        : '';
+
+      const queryList = [...new Set([
+        allCandidates[0],
+        nameQuery,
+        allCandidates[2] || allCandidates[1]
+      ].filter(Boolean))];
+
+      for (const query of queryList) {
+        let coords = await queryPhotonFallback(query);
+        if (!coords && Date.now() >= nominatimBlockedUntil) {
+          coords = await queryNominatimDirect(query);
+          await new Promise(r => setTimeout(r, 1100));
+        } else {
+          await new Promise(r => setTimeout(r, 250));
+        }
+
         if (coords) {
           coordCache[addrKey] = coords;
           saveLocalCoordCache();
           return coords;
         }
-        await new Promise(r => setTimeout(r, 1200));
       }
 
       // 찾지 못한 주소도 24시간 실패 캐시로 저장해 반복 에러 호출 방지
@@ -672,19 +686,19 @@ index
       }
 
       // 1단계: 기준약국 좌표 최우선 확보
-      if (anchor.address && getCachedCoords(anchor) === undefined) {
+      if ((anchor.address || anchor.customer_name) && getCachedCoords(anchor) === undefined) {
         await geocodeSingleCustomer(anchor);
         if (currentRunId !== geocodeRunId || anchorCustomerId !== id) return;
         renderRoutePanel();
         renderCustomers();
       }
 
-      // 2단계: 필터와 무관하게 기준약국 범위의 주변 약국들 좌표 계산
+      // 2단계: 현재 선택된 담당자(또는 전체) 범위의 주변 약국들만 좌표 계산
       const targets = getAnchorScopeCustomers(anchor).filter(c => c.id !== anchor.id);
 
       for (const c of targets) {
         if (currentRunId !== geocodeRunId || anchorCustomerId !== id) return;
-        if (!c.address || !c.address.trim()) continue;
+        if (!(c.address && c.address.trim()) && !(c.customer_name && c.customer_name.trim())) continue;
         if (getCachedCoords(c) !== undefined) continue;
 
         await geocodeSingleCustomer(c);
@@ -693,9 +707,7 @@ index
         renderRoutePanel();
         renderCustomers();
 
-        // Nominatim 차단 중에는 Photon을 쓰므로 대기 시간을 짧게, 정상 시엔 1.2초 간격 유지
-        const delayMs = Date.now() < nominatimBlockedUntil ? 350 : 1200;
-        await new Promise(r => setTimeout(r, delayMs));
+        await new Promise(r => setTimeout(r, 250));
       }
 
       if (currentRunId === geocodeRunId) {
@@ -753,6 +765,12 @@ index
       }
 
       panel.classList.remove('hidden');
+      const scopeLabel = selectedManager === 'ALL' ? '전체 담당자' : `담당자: ${selectedManager}`;
+      const titleEl = document.getElementById('routePanelTitle');
+      if (titleEl) {
+        titleEl.innerText = `🧭 기준약국 주변 동선 (${scopeLabel} 기준)`;
+      }
+
       document.getElementById('routeAnchorInfo').innerText =
         `기준약국: ${getPharmacyName(anchor)} (${anchor.address || '주소 없음'})`;
 
@@ -789,16 +807,16 @@ index
       }
 
       let statusMessage = '';
-      if (!anchor.address || !anchor.address.trim()) {
+      if (!anchor.address && !anchor.customer_name) {
         statusMessage = '기준약국의 주소가 비어 있어 거리를 계산할 수 없습니다.';
       } else if (!anchorReady && isGeocoding) {
-        statusMessage = '기준약국 주소를 좌표로 변환하는 중입니다...';
+        statusMessage = '기준약국 위치를 좌표로 변환하는 중입니다...';
       } else if (!anchorReady && !isGeocoding) {
         statusMessage = '기준약국 주소를 지도에서 찾지 못했습니다. (우측 길찾기 버튼은 바로 이용 가능)';
       } else if (isGeocoding) {
-        statusMessage = `기준약국 주변 좌표 계산 중... (${candidates.length}곳 중 ${resolvedCount}곳 완료)`;
+        statusMessage = `${scopeLabel} 약국 좌표 계산 중... (${candidates.length}곳 중 ${resolvedCount}곳 완료)`;
       } else {
-        statusMessage = `기준약국 주변 ${candidates.length}곳 중 ${resolvedCount}곳 거리 계산 완료 (가까운 순 표시)`;
+        statusMessage = `${scopeLabel} 약국 ${candidates.length}곳 중 ${resolvedCount}곳 거리 계산 완료 (가까운 순 표시)`;
       }
       document.getElementById('routeStatusText').innerText = statusMessage;
 
@@ -941,8 +959,9 @@ index
       const itemBtnsHtml = items.map(item => {
         const count = allCustomers.filter(c => getItemName(c) === item).length;
         const isActive = selectedItem === item;
+        const escapedItem = item.replace(/'/g, "\\'");
         return `
-          <button type="button" onclick="setItemMenu('${item.replace(/'/g, "\'")}')"
+          <button type="button" onclick="setItemMenu('${escapedItem}')"
             class="px-3 py-1 rounded-md text-xs font-bold transition shrink-0 cursor-pointer ${
               isActive
                 ? 'bg-amber-400 text-slate-900 shadow-sm'
@@ -964,6 +983,16 @@ index
       renderEntryMenus();
       updateVisitFilterButtons();
       updateManagerFilters();
+      if (anchorCustomerId) {
+        const anchor = allCustomers.find(c => c.id === anchorCustomerId);
+        const scoped = getMenuScopedCustomers();
+        if (!anchor || !scoped.some(c => c.id === anchor.id)) {
+          clearRouteAnchor();
+          return;
+        }
+        selectRouteAnchor(anchorCustomerId, true);
+        return;
+      }
       renderRoutePanel();
       renderCustomers();
     }
@@ -1087,9 +1116,10 @@ index
         const count = scoped.filter(c => getManagerName(c) === mgr).length;
         const doneCount = scoped.filter(c => getManagerName(c) === mgr && c.is_visited).length;
         const isActive = selectedManager === mgr;
+        const escapedMgr = mgr.replace(/'/g, "\\'");
 
         return `
-          <button type="button" onclick="setManagerFilter('${mgr.replace(/'/g, "\'")}')"
+          <button type="button" onclick="setManagerFilter('${escapedMgr}')"
             class="px-3.5 py-2 rounded-lg text-xs font-bold transition border cursor-pointer ${
               isActive
                 ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
@@ -1106,6 +1136,16 @@ index
     function setManagerFilter(mgr) {
       selectedManager = mgr;
       updateManagerFilters();
+      if (anchorCustomerId) {
+        const anchor = allCustomers.find(c => c.id === anchorCustomerId);
+        const scoped = getMenuScopedCustomers().filter(c => selectedManager === 'ALL' || getManagerName(c) === selectedManager);
+        if (!anchor || !scoped.some(c => c.id === anchor.id)) {
+          clearRouteAnchor();
+          return;
+        }
+        selectRouteAnchor(anchorCustomerId, true);
+        return;
+      }
       renderCustomers();
     }
 
@@ -1337,4 +1377,3 @@ index
   </script>
 </body>
 </html>
-분석 중
