@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>업무 관리 시스템</title>
+  <!-- Tailwind CSS (반응형 디자인) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Supabase JS (실시간 DB) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- SheetJS (엑셀 업로드/다운로드) -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen pb-16">
+
+  <!-- 팀 입장 코드 잠금 오버레이 -->
+  <div id="accessLockOverlay" class="fixed inset-0 z-50 bg-slate-900/90 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 border border-slate-200 space-y-4">
+      <div class="text-center space-y-1">
+        <div class="text-3xl">🔒</div>
+        <h1 class="text-lg font-extrabold text-slate-900">현장 방문 약국 관리</h1>
+        <p class="text-xs text-slate-500">지정된 팀원만 접근할 수 있습니다.<br/>전달받은 팀 입장 코드를 입력해주세요.</p>
+      </div>
+
+      <form onsubmit="verifyAccessCode(event)" class="space-y-3">
+        <div>
+          <input
+            type="password"
+            id="accessCodeInput"
+            autocomplete="current-password"
+            placeholder="팀 입장 코드 입력"
+            class="w-full text-sm text-center tracking-widest border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:border-blue-600"
+            required
+          />
+          <p id="accessCodeError" class="hidden text-xs text-red-600 font-semibold text-center mt-1.5">
+            입장 코드가 올바르지 않습니다. 다시 확인해주세요.
+          </p>
+        </div>
+        <button
+          type="submit"
+          class="w-full bg-blue-700 hover:bg-blue-800 text-white text-sm font-bold py-2.5 rounded-xl shadow-sm transition cursor-pointer"
+        >
+          입장하기
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- 메인 앱 래퍼 (인증 전까지 숨김) -->
+  <div id="appWrapper" class="hidden">
+
+    <!-- 상단 헤더 -->
+    <header class="bg-blue-700 text-white shadow-md sticky top-0 z-20">
+      <div class="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <span class="text-xl font-bold tracking-tight">🏥 현장 방문 약국 관리</span>
+          <span id="realtimeBadge" class="text-xs bg-emerald-500 text-white px-2 py-0.5 rounded-full animate-pulse">● 실시간 연동중</span>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button type="button" onclick="downloadTemplate()" class="text-xs bg-blue-600 hover:bg-blue-500 border border-blue-400 px-2.5 py-1.5 rounded cursor-pointer">
+            양식 받기
+          </button>
+          <label class="text-xs bg-white text-blue-700 font-semibold hover:bg-blue-50 px-3 py-1.5 rounded cursor-pointer shadow-sm">
+            📤 엑셀 업로드
+            <input type="file" id="excelInput" accept=".xlsx, .xls, .csv" class="hidden" onchange="handleExcelUpload(event)" />
+          </label>
+          <button type="button" onclick="exportToExcel()" class="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-3 py-1.5 rounded shadow-sm cursor-pointer">
+            📥 결과 다운로드
+          </button>
+          <button type="button" onclick="lockApp()" class="text-xs bg-blue-900 hover:bg-blue-950 text-blue-100 border border-blue-500 px-2.5 py-1.5 rounded cursor-pointer">
+            🔒 잠금
+          </button>
+        </div>
+      </div>
+
+      <!-- 엑셀 업로드 시 생성되는 진입 메뉴(아이템별) 바 -->
+      <div class="bg-blue-800/95 border-t border-blue-600">
+        <div class="max-w-6xl mx-auto px-4 py-2 flex items-center gap-2 overflow-x-auto" id="entryMenuBar">
+          <span class="text-xs text-blue-200 font-semibold shrink-0">🚩 진입 메뉴:</span>
+          <button type="button" onclick="setItemMenu('ALL')" class="px-3 py-1 rounded-md text-xs font-bold bg-white text-blue-800 shrink-0">
+            전체 메뉴 (0)
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-4 mt-6 space-y-6">
+
+      <!-- 관리자 지표 대시보드 -->
+      <section class="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
+        <div class="flex flex-wrap items-center justify-between mb-4 gap-2">
+          <h2 class="text-base font-bold text-slate-800">
+            📊 실시간 방문 지표 <span id="currentMenuLabel" class="text-xs font-semibold text-blue-600 ml-1">(전체 메뉴)</span>
+          </h2>
+          <div class="flex items-center gap-3">
+            <button type="button" onclick="deleteSelectedMenuData()" class="text-xs text-amber-600 hover:underline cursor-pointer">
+              선택 메뉴 삭제
+            </button>
+            <button type="button" onclick="clearAllData()" class="text-xs text-red-500 hover:underline cursor-pointer">
+              전체 데이터 초기화
+            </button>
+          </div>
+        </div>
+
+        <!-- 전체 요약 카드 -->
+        <div class="grid grid-cols-3 gap-3 mb-5 text-center">
+          <div class="bg-slate-50 p-3 rounded-lg border border-slate-100">
+            <div class="text-xs text-slate-500">전체 약국</div>
+            <div id="statTotal" class="text-xl font-extrabold text-slate-800 mt-1">0곳</div>
+          </div>
+          <div class="bg-blue-50 p-3 rounded-lg border border-blue-100">
+            <div class="text-xs text-blue-600">방문 완료</div>
+            <div id="statVisited" class="text-xl font-extrabold text-blue-700 mt-1">0곳</div>
+          </div>
+          <div class="bg-emerald-50 p-3 rounded-lg border border-emerald-100">
+            <div class="text-xs text-emerald-600">전체 방문율</div>
+            <div id="statRate" class="text-xl font-extrabold text-emerald-700 mt-1">0%</div>
+          </div>
+        </div>
+
+        <!-- 담당자별 방문율 프로그레스 바 -->
+        <div id="managerStatsContainer" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <!-- JS로 동적 렌더링 -->
+        </div>
+      </section>
+
+      <!-- 대상 약국 기준 주변 동선 패널 (기준 약국 선택 시 표시) -->
+      <section id="routePanel" class="hidden bg-indigo-50/70 rounded-xl shadow-sm p-4 border border-indigo-200 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div class="text-xs font-bold text-indigo-700">🧭 선택 대상 약국 기준 주변 동선</div>
+            <div id="routeAnchorInfo" class="text-sm font-extrabold text-slate-900 mt-0.5"></div>
+            <div id="routeStatusText" class="text-xs text-slate-600 mt-0.5"></div>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              id="sortByDistanceBtn"
+              onclick="toggleSortByDistance()"
+              class="px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer"
+            >
+              가까운 순 정렬: ON
+            </button>
+            <button
+              type="button"
+              onclick="clearRouteAnchor()"
+              class="px-3 py-1.5 rounded-lg text-xs font-bold bg-white text-slate-700 border border-slate-300 hover:bg-slate-100 cursor-pointer"
+            >
+              동선 해제
+            </button>
+          </div>
+        </div>
+
+        <div id="nearbyPharmaciesList" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+          <!-- JS로 동적 렌더링 -->
+        </div>
+      </section>
+
+      <!-- 조건검색 및 필터 영역 -->
+      <section class="bg-white rounded-xl shadow-sm p-4 border border-slate-200 space-y-3">
+        <!-- 조건검색 입력창 -->
+        <div class="flex flex-col sm:flex-row sm:items-center gap-2">
+          <label for="searchInput" class="text-xs font-bold text-slate-600 shrink-0">🔍 조건검색:</label>
+          <div class="flex items-center gap-2 flex-1">
+            <input
+              type="text"
+              id="searchInput"
+              oninput="handleSearchInput(event)"
+              placeholder="약국명, 주소, 담당자, 특이사항 검색..."
+              class="flex-1 text-xs border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+            />
+            <button
+              type="button"
+              onclick="resetSearch()"
+              class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold px-3 py-2 rounded-lg border border-slate-300 shrink-0 cursor-pointer"
+            >
+              검색 초기화
+            </button>
+          </div>
+        </div>
+
+        <!-- 방문여부 필터 버튼 -->
+        <div class="flex flex-col sm:flex-row sm:items-center gap-2 pt-2 border-t border-slate-100">
+          <span class="text-xs font-bold text-slate-600 shrink-0">✅ 방문여부 필터:</span>
+          <div class="flex items-center gap-2 flex-wrap" id="visitFilterButtons">
+            <button type="button" onclick="setVisitFilter('ALL')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white border border-blue-600 cursor-pointer">
+              전체
+            </button>
+            <button type="button" onclick="setVisitFilter('UNVISITED')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-50 text-slate-700 border border-slate-300 hover:bg-slate-100 cursor-pointer">
+              미방문
+            </button>
+            <button type="button" onclick="setVisitFilter('VISITED')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-50 text-slate-700 border border-slate-300 hover:bg-slate-100 cursor-pointer">
+              방문완료
+            </button>
+          </div>
+        </div>
+
+        <!-- 담당자 이름 버튼 필터 영역 -->
+        <div class="flex flex-col sm:flex-row sm:items-center gap-2 pt-2 border-t border-slate-100">
+          <span class="text-xs font-bold text-slate-600 shrink-0">👤 담당자 필터:</span>
+          <div class="flex items-center gap-2 flex-wrap" id="managerFilterButtons">
+            <button type="button" onclick="setManagerFilter('ALL')" class="px-3.5 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white">전체</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 약국 리스트 영역 (모바일 카드 / PC 그리드 반응형) -->
+      <section id="customerList" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="col-span-full text-center py-12 text-slate-400 text-sm">데이터를 불러오는 중입니다...</div>
+      </section>
+
+    </main>
+  </div>
+
+  <script>
+    // ==========================================
+    // [팀 공통 입장 코드 설정] 원하는 비밀번호로 변경하세요
+    // ==========================================
+    const TEAM_ACCESS_CODE = '2026';
+    const ACCESS_STORAGE_KEY = 'pharmacy_app_unlocked_v1';
+
+    // ==========================================
+    // [필수 입력] Supabase 키 입력
+    // ==========================================
+    const SUPABASE_URL = 'https://yojjqxiobgbpykzoyzch.supabase.co';
+    const SUPABASE_ANON_KEY = 'sb_publishable_o6exz9T79woC5zqQMO-FYg_GyFuvxnn';
+
+    const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    let isAppInitialized = false;
+    let allCustomers = [];
+    let selectedItem = 'ALL';
+    let selectedManager = 'ALL';
+    let selectedVisitFilter = 'ALL'; // 'ALL' | 'UNVISITED' | 'VISITED'
+    let searchKeyword = '';
+
+    // 주변 약국 동선 상태
+    let anchorCustomerId = null;
+    let sortByDistance = true;
+    let coordCache = {};
+    let isGeocoding = false;
+
+    function unlockApp() {
+      document.getElementById('accessLockOverlay').classList.add('hidden');
+      document.getElementById('appWrapper').classList.remove('hidden');
+      if (!isAppInitialized) {
+        isAppInitialized = true;
+        init();
+      }
+    }
+
+    function lockApp() {
+      sessionStorage.removeItem(ACCESS_STORAGE_KEY);
+      document.getElementById('accessCodeInput').value = '';
+      document.getElementById('accessCodeError').classList.add('hidden');
+      document.getElementById('appWrapper').classList.add('hidden');
+      document.getElementById('accessLockOverlay').classList.remove('hidden');
+    }
+
+    function verifyAccessCode(event) {
+      event.preventDefault();
+      const inputEl = document.getElementById('accessCodeInput');
+      const errEl = document.getElementById('accessCodeError');
+      const entered = (inputEl.value || '').trim();
+
+      if (entered === TEAM_ACCESS_CODE) {
+        errEl.classList.add('hidden');
+        sessionStorage.setItem(ACCESS_STORAGE_KEY, 'true');
+        unlockApp();
+      } else {
+        errEl.classList.remove('hidden');
+        inputEl.focus();
+        inputEl.select();
+      }
+    }
+
+    function checkInitialAccess() {
+      if (sessionStorage.getItem(ACCESS_STORAGE_KEY) === 'true') {
+        unlockApp();
+      } else {
+        const inputEl = document.getElementById('accessCodeInput');
+        if (inputEl) inputEl.focus();
+      }
+    }
+
+    function getItemName(c) {
+      return (c.item || '기본메뉴').trim();
+    }
+
+    function getManagerName(c) {
+      return (c.manager || '미지정').trim();
+    }
+
+    function getPharmacyName(c) {
+      return (c.customer_name || '약국명 없음').trim();
+    }
+
+    function getNaverMapUrl(queryText) {
+      return `https://map.naver.com/v5/search/${encodeURIComponent(queryText)}`;
+    }
+
+    function getNaverRouteUrl(fromCustomer, toCustomer) {
+      const startQuery = (fromCustomer.address || getPharmacyName(fromCustomer)).trim();
+      const endQuery = (toCustomer.address || getPharmacyName(toCustomer)).trim();
+      return `https://map.naver.com/v5/search/${encodeURIComponent(`${startQuery} ${endQuery}`)}`;
+    }
+
+    function getMenuScopedCustomers() {
+      if (selectedItem === 'ALL') return allCustomers;
+      return allCustomers.filter(c => getItemName(c) === selectedItem);
+    }
+
+    // 두 좌표 간 직선거리(미터) 계산 (Haversine)
+    function calcDistanceMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const toRad = deg => (deg * Math.PI) / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return Math.round(R * c);
+    }
+
+    function formatDistance(meters) {
+      if (meters == null || Number.isNaN(meters)) return '';
+      if (meters < 1000) return `약 ${meters}m`;
+      return `약 ${(meters / 1000).toFixed(1)}km`;
+    }
+
+    function buildAddressCandidates(rawAddress) {
+      const clean = (rawAddress || '')
+        .replace(/\(.*?\)/g, ' ')
+        .replace(/\b\d+\s*층\b/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!clean) return [];
+
+      const candidates = [clean];
+      const parts = clean.split(' ');
+      if (parts.length >= 4) {
+        candidates.push(parts.slice(0, 4).join(' '));
+      }
+      if (parts.length >= 3) {
+        candidates.push(parts.slice(0, 3).join(' '));
+      }
+      return [...new Set(candidates)];
+    }
+
+    async function geocodeSingleCustomer(customer) {
+      const id = customer.id;
+      if (Object.prototype.hasOwnProperty.call(coordCache, id) && coordCache[id] !== undefined) {
+        return coordCache[id];
+      }
+
+      const candidates = buildAddressCandidates(customer.address);
+      for (const query of candidates) {
+        try {
+          const url = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=kr&limit=1&q=${encodeURIComponent(query)}`;
+          const res = await fetch(url, { headers: { 'Accept-Language': 'ko' } });
+          if (!res.ok) continue;
+          const list = await res.json();
+          if (Array.isArray(list) && list.length > 0 && list[0].lat && list[0].lon) {
+            const coords = { lat: parseFloat(list[0].lat), lon: parseFloat(list[0].lon) };
+            coordCache[id] = coords;
+            return coords;
+          }
+        } catch (err) {
+          // 다음 후보 주소 시도
+        }
+      }
+
+      coordCache[id] = null;
+      return null;
+    }
+
+    async function selectRouteAnchor(id) {
+      if (anchorCustomerId === id) {
+        clearRouteAnchor();
+        return;
+      }
+      anchorCustomerId = id;
+      sortByDistance = true;
+      renderRoutePanel();
+      renderCustomers();
+
+      if (isGeocoding) return;
+      isGeocoding = true;
+
+      const anchor = allCustomers.find(c => c.id === anchorCustomerId);
+      const targets = anchor ? [anchor, ...getMenuScopedCustomers().filter(c => c.id !== anchor.id)] : [];
+
+      for (const c of targets) {
+        if (anchorCustomerId !== id) break;
+        if (!c.address || !c.address.trim()) {
+          coordCache[c.id] = null;
+          continue;
+        }
+        if (coordCache[c.id] === undefined) {
+          await geocodeSingleCustomer(c);
+          renderRoutePanel();
+          renderCustomers();
+          await new Promise(r => setTimeout(r, 250));
+        }
+      }
+
+      isGeocoding = false;
+      renderRoutePanel();
+      renderCustomers();
+    }
+
+    function clearRouteAnchor() {
+      anchorCustomerId = null;
+      renderRoutePanel();
+      renderCustomers();
+    }
+
+    function toggleSortByDistance() {
+      sortByDistance = !sortByDistance;
+      renderRoutePanel();
+      renderCustomers();
+    }
+
+    function getDistanceFromAnchor(customer) {
+      if (!anchorCustomerId || customer.id === anchorCustomerId) return null;
+      const aCoord = coordCache[anchorCustomerId];
+      const bCoord = coordCache[customer.id];
+      if (!aCoord || !bCoord) return null;
+      return calcDistanceMeters(aCoord.lat, aCoord.lon, bCoord.lat, bCoord.lon);
+    }
+
+    function renderRoutePanel() {
+      const panel = document.getElementById('routePanel');
+      if (!panel) return;
+
+      const anchor = allCustomers.find(c => c.id === anchorCustomerId);
+      if (!anchor) {
+        panel.classList.add('hidden');
+        return;
+      }
+
+      panel.classList.remove('hidden');
+      document.getElementById('routeAnchorInfo').innerText =
+        `기준: ${getPharmacyName(anchor)} (${anchor.address || '주소 없음'})`;
+
+      const sortBtn = document.getElementById('sortByDistanceBtn');
+      if (sortBtn) {
+        sortBtn.innerText = `가까운 순 정렬: ${sortByDistance ? 'ON' : 'OFF'}`;
+        sortBtn.className = sortByDistance
+          ? 'px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer'
+          : 'px-3 py-1.5 rounded-lg text-xs font-bold bg-white text-indigo-700 border border-indigo-300 hover:bg-indigo-100 cursor-pointer';
+      }
+
+      const candidates = getMenuScopedCustomers()
+        .filter(c => c.id !== anchor.id)
+        .map(c => ({
+          customer: c,
+          distance: getDistanceFromAnchor(c)
+        }))
+        .sort((x, y) => {
+          if (x.distance == null && y.distance == null) return 0;
+          if (x.distance == null) return 1;
+          if (y.distance == null) return -1;
+          return x.distance - y.distance;
+        });
+
+      const resolvedCount = candidates.filter(x => x.distance != null).length;
+      document.getElementById('routeStatusText').innerText = isGeocoding
+        ? `주소 좌표 변환 중... (${resolvedCount}/${candidates.length}곳 거리 계산 완료)`
+        : `현재 메뉴 기준 ${candidates.length}곳 중 ${resolvedCount}곳 거리 계산 완료 (가까운 순 표시)`;
+
+      const listEl = document.getElementById('nearbyPharmaciesList');
+      if (candidates.length === 0) {
+        listEl.innerHTML = `<div class="col-span-full text-xs text-slate-500">비교할 다른 주변 약국이 없습니다.</div>`;
+        return;
+      }
+
+      listEl.innerHTML = candidates.slice(0, 9).map(({ customer: c, distance }) => {
+        const distLabel = distance != null
+          ? `<span class="text-xs font-extrabold text-indigo-700">${formatDistance(distance)}</span>`
+          : `<span class="text-xs text-slate-400">거리 미확인</span>`;
+
+        return `
+          <div class="bg-white rounded-lg p-3 border border-indigo-100 flex items-center justify-between gap-2">
+            <div class="min-w-0">
+              <div class="flex items-center gap-1.5">
+                ${distLabel}
+                <span class="text-[11px] text-slate-500 truncate">담당: ${getManagerName(c)}</span>
+              </div>
+              <div class="text-xs font-bold text-slate-900 truncate mt-0.5">${getPharmacyName(c)}</div>
+              <div class="text-[11px] text-slate-500 truncate">${c.address || '주소 없음'}</div>
+            </div>
+            <a
+              href="${getNaverRouteUrl(anchor, c)}"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="px-2.5 py-1.5 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold shrink-0"
+            >
+              길찾기
+            </a>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function getFilteredCustomers() {
+      const scoped = getMenuScopedCustomers();
+      const kw = searchKeyword.trim().toLowerCase();
+
+      const filtered = scoped.filter(c => {
+        if (selectedManager !== 'ALL' && getManagerName(c) !== selectedManager) return false;
+        if (selectedVisitFilter === 'VISITED' && !c.is_visited) return false;
+        if (selectedVisitFilter === 'UNVISITED' && c.is_visited) return false;
+
+        if (kw) {
+          const hay = [
+            getItemName(c),
+            getManagerName(c),
+            getPharmacyName(c),
+            c.address || '',
+            c.memo || ''
+          ].join(' ').toLowerCase();
+          if (!hay.includes(kw)) return false;
+        }
+        return true;
+      });
+
+      if (anchorCustomerId && sortByDistance) {
+        return [...filtered].sort((a, b) => {
+          if (a.id === anchorCustomerId) return -1;
+          if (b.id === anchorCustomerId) return 1;
+          const da = getDistanceFromAnchor(a);
+          const dbDist = getDistanceFromAnchor(b);
+          if (da == null && dbDist == null) return 0;
+          if (da == null) return 1;
+          if (dbDist == null) return -1;
+          return da - dbDist;
+        });
+      }
+
+      return filtered;
+    }
+
+    // 초기 실행 및 실시간 구독 설정
+    async function init() {
+      await fetchCustomers();
+
+      db.channel('customers-channel')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => {
+          fetchCustomers();
+        })
+        .subscribe();
+    }
+
+    // 데이터 조회
+    async function fetchCustomers() {
+      const { data, error } = await db
+        .from('customers')
+        .select('*')
+        .order('is_visited', { ascending: true })
+        .order('id', { ascending: true });
+
+      if (error) {
+        console.error(error);
+        alert('DB 연결 오류: SUPABASE_URL, KEY 또는 테이블 설정을 확인해주세요.');
+        return;
+      }
+      allCustomers = data || [];
+
+      if (anchorCustomerId && !allCustomers.some(c => c.id === anchorCustomerId)) {
+        anchorCustomerId = null;
+      }
+
+      const itemExists = selectedItem === 'ALL' || allCustomers.some(c => getItemName(c) === selectedItem);
+      if (!itemExists) selectedItem = 'ALL';
+
+      const scoped = getMenuScopedCustomers();
+      const mgrExists = selectedManager === 'ALL' || scoped.some(c => getManagerName(c) === selectedManager);
+      if (!mgrExists) selectedManager = 'ALL';
+
+      renderEntryMenus();
+      updateDashboard();
+      updateVisitFilterButtons();
+      updateManagerFilters();
+      renderRoutePanel();
+      renderCustomers();
+    }
+
+    // 엑셀 업로드 시 아이템별 진입 메뉴 버튼 생성
+    function renderEntryMenus() {
+      const items = [...new Set(allCustomers.map(getItemName).filter(Boolean))];
+      const bar = document.getElementById('entryMenuBar');
+
+      const labelHtml = `<span class="text-xs text-blue-200 font-semibold shrink-0">🚩 진입 메뉴:</span>`;
+      const allActive = selectedItem === 'ALL';
+      const allHtml = `
+        <button type="button" onclick="setItemMenu('ALL')"
+          class="px-3 py-1 rounded-md text-xs font-bold transition shrink-0 cursor-pointer ${
+            allActive
+              ? 'bg-white text-blue-800 shadow-sm'
+              : 'bg-blue-700/70 text-blue-100 hover:bg-blue-600'
+          }">
+          전체 메뉴 (${allCustomers.length})
+        </button>
+      `;
+
+      const itemBtnsHtml = items.map(item => {
+        const count = allCustomers.filter(c => getItemName(c) === item).length;
+        const isActive = selectedItem === item;
+        return `
+          <button type="button" onclick="setItemMenu('${item.replace(/'/g, "\\'")}')"
+            class="px-3 py-1 rounded-md text-xs font-bold transition shrink-0 cursor-pointer ${
+              isActive
+                ? 'bg-amber-400 text-slate-900 shadow-sm'
+                : 'bg-blue-700/70 text-blue-100 hover:bg-blue-600'
+            }">
+            ${item} (${count})
+          </button>
+        `;
+      }).join('');
+
+      bar.innerHTML = labelHtml + allHtml + itemBtnsHtml;
+      document.getElementById('currentMenuLabel').innerText =
+        selectedItem === 'ALL' ? '(전체 메뉴)' : `(${selectedItem} 메뉴)`;
+    }
+
+    function setItemMenu(item) {
+      selectedItem = item;
+      selectedManager = 'ALL';
+      renderEntryMenus();
+      updateDashboard();
+      updateVisitFilterButtons();
+      updateManagerFilters();
+      renderRoutePanel();
+      renderCustomers();
+    }
+
+    function handleSearchInput(event) {
+      searchKeyword = event.target.value || '';
+      renderCustomers();
+    }
+
+    function resetSearch() {
+      searchKeyword = '';
+      const input = document.getElementById('searchInput');
+      if (input) input.value = '';
+      renderCustomers();
+    }
+
+    function updateVisitFilterButtons() {
+      const scoped = getMenuScopedCustomers();
+      const totalCount = scoped.length;
+      const visitedCount = scoped.filter(c => c.is_visited).length;
+      const unvisitedCount = totalCount - visitedCount;
+
+      const configs = [
+        { key: 'ALL', label: `전체 (${totalCount})` },
+        { key: 'UNVISITED', label: `미방문 (${unvisitedCount})` },
+        { key: 'VISITED', label: `방문완료 (${visitedCount})` }
+      ];
+
+      const container = document.getElementById('visitFilterButtons');
+      if (!container) return;
+
+      container.innerHTML = configs.map(cfg => {
+        const isActive = selectedVisitFilter === cfg.key;
+        const activeClass = cfg.key === 'VISITED'
+          ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+          : 'bg-blue-600 text-white border-blue-600 shadow-sm';
+        const inactiveClass = 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100';
+
+        return `
+          <button type="button" onclick="setVisitFilter('${cfg.key}')"
+            class="px-3 py-1.5 rounded-lg text-xs font-bold transition border cursor-pointer ${isActive ? activeClass : inactiveClass}">
+            ${cfg.label}
+          </button>
+        `;
+      }).join('');
+    }
+
+    function setVisitFilter(mode) {
+      selectedVisitFilter = mode;
+      updateVisitFilterButtons();
+      renderCustomers();
+    }
+
+    async function toggleVisit(id, currentStatus) {
+      const newStatus = !currentStatus;
+      const visitedAt = newStatus ? new Date().toISOString() : null;
+
+      const target = allCustomers.find(c => c.id === id);
+      if (target) {
+        target.is_visited = newStatus;
+        target.visited_at = visitedAt;
+        updateDashboard();
+        updateVisitFilterButtons();
+        updateManagerFilters();
+        renderCustomers();
+      }
+
+      const { error } = await db
+        .from('customers')
+        .update({ is_visited: newStatus, visited_at: visitedAt })
+        .eq('id', id);
+
+      if (error) {
+        alert('상태 업데이트 실패: ' + error.message);
+        fetchCustomers();
+      }
+    }
+
+    async function saveMemo(id) {
+      const inputEl = document.getElementById(`memo-${id}`);
+      const memoText = inputEl.value;
+
+      const { error } = await db
+        .from('customers')
+        .update({ memo: memoText })
+        .eq('id', id);
+
+      if (error) {
+        alert('메모 저장 실패');
+      } else {
+        const target = allCustomers.find(c => c.id === id);
+        if (target) target.memo = memoText;
+
+        const btn = document.getElementById(`memo-btn-${id}`);
+        btn.innerText = '저장됨 ✓';
+        btn.classList.replace('bg-slate-700', 'bg-emerald-600');
+        setTimeout(() => {
+          btn.innerText = '메모 저장';
+          btn.classList.replace('bg-emerald-600', 'bg-slate-700');
+        }, 1500);
+      }
+    }
+
+    function updateDashboard() {
+      const scoped = getMenuScopedCustomers();
+      const total = scoped.length;
+      const visited = scoped.filter(c => c.is_visited).length;
+      const rate = total === 0 ? 0 : Math.round((visited / total) * 100);
+
+      document.getElementById('statTotal').innerText = `${total}곳`;
+      document.getElementById('statVisited').innerText = `${visited}곳`;
+      document.getElementById('statRate').innerText = `${rate}%`;
+
+      const managerMap = {};
+      scoped.forEach(c => {
+        const mgr = getManagerName(c);
+        if (!managerMap[mgr]) managerMap[mgr] = { total: 0, visited: 0 };
+        managerMap[mgr].total++;
+        if (c.is_visited) managerMap[mgr].visited++;
+      });
+
+      const container = document.getElementById('managerStatsContainer');
+      const managers = Object.keys(managerMap);
+
+      if (managers.length === 0) {
+        container.innerHTML = `<div class="col-span-full text-xs text-slate-400">엑셀 파일을 업로드하면 담당자별 방문율이 표시됩니다.</div>`;
+        return;
+      }
+
+      container.innerHTML = managers.map(mgr => {
+        const { total: mTotal, visited: mVisited } = managerMap[mgr];
+        const mRate = Math.round((mVisited / mTotal) * 100);
+        return `
+          <div class="border border-slate-200 rounded-lg p-3 bg-slate-50/50">
+            <div class="flex justify-between items-center text-xs font-bold mb-1.5">
+              <span class="text-slate-700">👤 ${mgr}</span>
+              <span class="text-blue-700">${mRate}% (${mVisited}/${mTotal})</span>
+            </div>
+            <div class="w-full bg-slate-200 rounded-full h-2">
+              <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: ${mRate}%"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function updateManagerFilters() {
+      const scoped = getMenuScopedCustomers();
+      const managers = [...new Set(scoped.map(getManagerName).filter(Boolean))];
+      const container = document.getElementById('managerFilterButtons');
+
+      const allBtnActive = selectedManager === 'ALL';
+      const allBtnHtml = `
+        <button type="button" onclick="setManagerFilter('ALL')"
+          class="px-3.5 py-2 rounded-lg text-xs font-bold transition border cursor-pointer ${
+            allBtnActive
+              ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+              : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+          }">
+          전체 (${scoped.length})
+        </button>
+      `;
+
+      const managerBtnsHtml = managers.map(mgr => {
+        const count = scoped.filter(c => getManagerName(c) === mgr).length;
+        const doneCount = scoped.filter(c => getManagerName(c) === mgr && c.is_visited).length;
+        const isActive = selectedManager === mgr;
+
+        return `
+          <button type="button" onclick="setManagerFilter('${mgr.replace(/'/g, "\\'")}')"
+            class="px-3.5 py-2 rounded-lg text-xs font-bold transition border cursor-pointer ${
+              isActive
+                ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-blue-50 hover:border-blue-300'
+            }">
+            ${mgr} <span class="${isActive ? 'text-blue-100' : 'text-slate-400'} font-normal">(${doneCount}/${count})</span>
+          </button>
+        `;
+      }).join('');
+
+      container.innerHTML = allBtnHtml + managerBtnsHtml;
+    }
+
+    function setManagerFilter(mgr) {
+      selectedManager = mgr;
+      updateManagerFilters();
+      renderCustomers();
+    }
+
+    function renderCustomers() {
+      const filtered = getFilteredCustomers();
+      const listEl = document.getElementById('customerList');
+
+      if (filtered.length === 0) {
+        listEl.innerHTML = `<div class="col-span-full bg-white rounded-xl p-10 text-center text-slate-400 text-sm border border-slate-200">검색 또는 필터 조건에 맞는 약국 데이터가 없습니다.</div>`;
+        return;
+      }
+
+      const anchor = allCustomers.find(c => c.id === anchorCustomerId);
+
+      listEl.innerHTML = filtered.map(c => {
+        const pharmacyName = getPharmacyName(c);
+        const mapSearchTarget = c.address ? c.address.trim() : pharmacyName;
+        const isAnchor = c.id === anchorCustomerId;
+        const distMeters = getDistanceFromAnchor(c);
+        const distBadge = isAnchor
+          ? `<span class="inline-block bg-indigo-600 text-white text-xs font-bold px-2 py-0.5 rounded">📌 기준약국</span>`
+          : distMeters != null
+            ? `<span class="inline-block bg-indigo-100 text-indigo-800 text-xs font-bold px-2 py-0.5 rounded">${formatDistance(distMeters)}</span>`
+            : '';
+
+        const formattedTime = c.visited_at
+          ? new Date(c.visited_at).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+          : '';
+
+        const borderClass = isAnchor
+          ? 'border-indigo-500 ring-2 ring-indigo-200 bg-indigo-50/20'
+          : c.is_visited
+            ? 'border-emerald-300 bg-emerald-50/20'
+            : 'border-slate-200';
+
+        return `
+          <div class="bg-white rounded-xl shadow-sm border ${borderClass} p-4 flex flex-col justify-between gap-3 transition">
+            <div>
+              <div class="flex items-start justify-between gap-2">
+                <div>
+                  <div class="flex flex-wrap items-center gap-1.5 mb-1">
+                    <span class="inline-block bg-amber-100 text-amber-900 text-xs font-bold px-2 py-0.5 rounded">${getItemName(c)}</span>
+                    <span class="inline-block bg-slate-100 text-slate-700 text-xs font-semibold px-2 py-0.5 rounded">담당: ${getManagerName(c)}</span>
+                    ${distBadge}
+                  </div>
+                  <h3 class="text-base font-bold text-slate-900">
+                    <a href="${getNaverMapUrl(pharmacyName)}" target="_blank" rel="noopener noreferrer" class="hover:text-blue-600 underline decoration-blue-300 underline-offset-4">
+                      🏥 ${pharmacyName}
+                    </a>
+                  </h3>
+                </div>
+
+                <!-- 방문 완료 체크 버튼 (재클릭 시 미방문으로 복구) -->
+                <button type="button" onclick="toggleVisit(${c.id}, ${c.is_visited})"
+                  title="${c.is_visited ? '클릭하면 미방문 상태로 되돌립니다' : '클릭하면 방문완료 처리됩니다'}"
+                  class="px-3.5 py-2 rounded-lg text-xs font-bold shadow-sm transition flex items-center gap-1.5 cursor-pointer ${
+                    c.is_visited
+                      ? 'bg-emerald-600 text-white hover:bg-amber-600'
+                      : 'bg-slate-100 text-slate-700 hover:bg-blue-600 hover:text-white border border-slate-300'
+                  }">
+                  ${c.is_visited ? '✅ 방문완료 (취소)' : '⬜ 방문체크'}
+                </button>
+              </div>
+
+              <!-- 방문 완료 시간 자동 표시 -->
+              ${c.is_visited ? `<div class="text-xs text-emerald-700 font-medium mt-1">🕒 완료시간: ${formattedTime}</div>` : ''}
+
+              <!-- 방문 주소 및 주변 동선 버튼 -->
+              <div class="mt-3 text-xs text-slate-600 flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-start gap-2 min-w-0">
+                  <span>📍</span>
+                  <a href="${getNaverMapUrl(mapSearchTarget)}" target="_blank" rel="noopener noreferrer" class="text-slate-700 hover:text-blue-600 underline break-all">
+                    ${c.address || `${pharmacyName} (네이버 지도)`}
+                  </a>
+                </div>
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onclick="selectRouteAnchor(${c.id})"
+                    class="px-2.5 py-1 rounded-md text-xs font-bold transition cursor-pointer ${
+                      isAnchor
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100'
+                    }"
+                  >
+                    ${isAnchor ? '기준 해제' : '🧭 주변 동선'}
+                  </button>
+                  ${anchor && !isAnchor ? `
+                    <a
+                      href="${getNaverRouteUrl(anchor, c)}"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="px-2.5 py-1 rounded-md text-xs font-bold bg-slate-100 text-slate-700 border border-slate-300 hover:bg-slate-200"
+                    >
+                      길찾기
+                    </a>
+                  ` : ''}
+                </div>
+              </div>
+            </div>
+
+            <!-- 특이사항 입력 영역 -->
+            <div class="pt-2 border-t border-slate-100 flex gap-1.5">
+              <input type="text" id="memo-${c.id}" value="${(c.memo || '').replace(/"/g, '&quot;')}" placeholder="특이사항 입력 (예: 약사님 부재, 재방문 요망)"
+                class="flex-1 text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500" />
+              <button type="button" id="memo-btn-${c.id}" onclick="saveMemo(${c.id})"
+                class="bg-slate-700 hover:bg-slate-800 text-white text-xs font-medium px-3 py-1.5 rounded-lg whitespace-nowrap transition cursor-pointer">
+                메모 저장
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function handleExcelUpload(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+        if (rows.length === 0) {
+          alert('엑셀 파일에 데이터가 없습니다.');
+          return;
+        }
+
+        const formattedRows = rows.map(row => ({
+          item: String(row['아이템'] || row['진입메뉴'] || row['구분'] || row['item'] || '기본메뉴').trim(),
+          manager: String(row['담당자'] || row['담당자명'] || '미지정').trim(),
+          customer_name: String(row['약국명'] || row['거래처명'] || row['거래처'] || row['약국'] || row['pharmacy_name'] || '약국명 없음').trim(),
+          phone: '',
+          address: String(row['방문주소'] || row['주소'] || row['address'] || '').trim(),
+          memo: String(row['특이사항'] || row['memo'] || '').trim(),
+          is_visited: false
+        }));
+
+        const { error } = await db.from('customers').insert(formattedRows);
+        if (error) {
+          alert('업로드 중 오류가 발생했습니다: ' + error.message);
+        } else {
+          coordCache = {};
+          await fetchCustomers();
+          const createdItems = [...new Set(formattedRows.map(r => r.item))];
+          alert(`${formattedRows.length}곳의 약국 리스트가 등록되었으며, 진입 메뉴(${createdItems.join(', ')})가 생성되었습니다.`);
+        }
+        event.target.value = '';
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function downloadTemplate() {
+      const sample = [
+        { '아이템': '실손24 안내', '담당자': '김철수', '약국명': '온누리중앙약국', '방문주소': '서울시 강남구 테헤란로 123', '특이사항': '오전 방문 선호' },
+        { '아이템': '현장 방문점검', '담당자': '이영희', '약국명': '메디컬그린약국', '방문주소': '서울시 서초구 서초대로 456', '특이사항': '' }
+      ];
+      const ws = XLSX.utils.json_to_sheet(sample);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '약국양식');
+      XLSX.writeFile(wb, '방문약국_업로드_양식.xlsx');
+    }
+
+    function exportToExcel() {
+      if (allCustomers.length === 0) {
+        alert('다운로드할 데이터가 없습니다.');
+        return;
+      }
+      const exportData = allCustomers.map(c => ({
+        '아이템': getItemName(c),
+        '담당자': getManagerName(c),
+        '약국명': getPharmacyName(c),
+        '방문주소': c.address,
+        '방문여부': c.is_visited ? '완료' : '미방문',
+        '방문완료시간': c.visited_at ? new Date(c.visited_at).toLocaleString('ko-KR') : '',
+        '특이사항': c.memo || ''
+      }));
+      const ws = XLSX.utils.json_to_sheet(exportData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '방문결과');
+      XLSX.writeFile(wb, `현장방문_약국결과_${new Date().toISOString().slice(0,10)}.xlsx`);
+    }
+
+    async function deleteSelectedMenuData() {
+      if (selectedItem === 'ALL') {
+        alert('개별 삭제하려면 상단 진입 메뉴에서 삭제할 메뉴를 먼저 선택해주세요. (전체 삭제는 "전체 데이터 초기화" 이용)');
+        return;
+      }
+
+      const targetRows = allCustomers.filter(c => getItemName(c) === selectedItem);
+      if (!confirm(`"${selectedItem}" 메뉴의 약국 데이터 ${targetRows.length}곳을 삭제하시겠습니까? (삭제 후 복구 불가)`)) {
+        return;
+      }
+
+      const { error } = await db
+        .from('customers')
+        .delete()
+        .eq('item', selectedItem);
+
+      if (error) {
+        alert('메뉴 삭제 실패: ' + error.message);
+      } else {
+        selectedItem = 'ALL';
+        await fetchCustomers();
+      }
+    }
+
+    async function clearAllData() {
+      if (!confirm('정말로 모든 약국 데이터를 삭제하시겠습니까? (삭제 후 복구 불가)')) return;
+      const { error } = await db.from('customers').delete().neq('id', 0);
+      if (error) alert('삭제 실패: ' + error.message);
+      else {
+        coordCache = {};
+        anchorCustomerId = null;
+        await fetchCustomers();
+      }
+    }
+
+    checkInitialAccess();
+  </script>
+</body>
+</html>
